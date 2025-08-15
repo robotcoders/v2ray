@@ -66,31 +66,54 @@ if [[ -z "$PATH" ]]; then
     PATH="/"
 fi
 
-# 更新系统并安装必要工具
-echo -e "${BLUE}更新系统并安装必要工具...${PLAIN}"
+# 确保基本命令可用
+echo -e "${BLUE}检查并安装基本命令...${PLAIN}"
+
 # 检查是否为WSL环境
-if grep -q Microsoft /proc/version; then
-    echo -e "${YELLOW}检测到WSL环境，使用apt-get命令...${PLAIN}"
-    apt-get update -y
-    apt-get upgrade -y
-    apt-get install -y curl wget unzip net-tools
+if [ -f /proc/version ] && grep -q Microsoft /proc/version 2>/dev/null; then
+    echo -e "${YELLOW}检测到WSL环境...${PLAIN}"
+    WSL_ENV=true
 else
-    apt update -y
-    apt upgrade -y
-    apt install -y curl wget unzip net-tools
+    WSL_ENV=false
 fi
+
+# 确保基本命令可用
+if ! command -v apt &> /dev/null && ! command -v apt-get &> /dev/null; then
+    echo -e "${RED}错误: 无法找到apt或apt-get命令，请确保系统是基于Debian/Ubuntu的发行版${PLAIN}"
+    exit 1
+fi
+
+# 优先使用apt-get，因为在某些WSL环境中apt可能不可用
+if command -v apt-get &> /dev/null; then
+    PKG_MANAGER="apt-get"
+else
+    PKG_MANAGER="apt"
+ fi
+
+# 安装基本工具
+echo -e "${BLUE}安装基本工具...${PLAIN}"
+$PKG_MANAGER update -y
+
+# 安装必要的基础工具
+echo -e "${BLUE}安装必要的基础工具...${PLAIN}"
+$PKG_MANAGER install -y curl wget unzip net-tools grep
 
 # 安装V2Ray
 echo -e "${BLUE}安装V2Ray...${PLAIN}"
-# 检查curl命令是否可用
-if ! command -v curl &> /dev/null; then
-    echo -e "${YELLOW}curl命令未找到，尝试安装curl...${PLAIN}"
-    if grep -q Microsoft /proc/version; then
-        apt-get install -y curl
-    else
-        apt install -y curl
+
+# 确保所有必要的命令都可用
+for cmd in curl wget chmod bash; do
+    if ! command -v $cmd &> /dev/null; then
+        echo -e "${YELLOW}${cmd}命令未找到，尝试安装${cmd}...${PLAIN}"
+        $PKG_MANAGER install -y $cmd
+        
+        # 再次检查命令是否安装成功
+        if ! command -v $cmd &> /dev/null; then
+            echo -e "${RED}错误: 无法安装${cmd}命令，请手动安装后重试${PLAIN}"
+            exit 1
+        fi
     fi
-fi
+done
 
 # 下载安装脚本并执行
 echo -e "${BLUE}下载V2Ray安装脚本...${PLAIN}"
@@ -133,47 +156,178 @@ EOF
 # 启动V2Ray并设置开机自启
 echo -e "${BLUE}启动V2Ray并设置开机自启...${PLAIN}"
 
-# 检查是否为WSL环境
-if grep -q Microsoft /proc/version; then
-    echo -e "${YELLOW}检测到WSL环境，使用service命令启动V2Ray...${PLAIN}"
-    service v2ray start
-    # 检查V2Ray状态
-    if service v2ray status | grep -q "running"; then
-        echo -e "${GREEN}V2Ray安装成功并正在运行!${PLAIN}"
-    else
-        echo -e "${YELLOW}尝试直接运行V2Ray...${PLAIN}"
-        /usr/local/bin/v2ray run -c /usr/local/etc/v2ray/config.json &
+# 确保pgrep和sleep命令可用
+for cmd in pgrep sleep; do
+    if ! command -v $cmd &> /dev/null; then
+        echo -e "${YELLOW}${cmd}命令未找到，尝试安装${cmd}...${PLAIN}"
+        $PKG_MANAGER install -y $cmd || $PKG_MANAGER install -y procps
+    fi
+done
+
+# 根据环境选择启动方式
+if [ "$WSL_ENV" = true ]; then
+    echo -e "${YELLOW}WSL环境中启动V2Ray...${PLAIN}"
+    
+    # 尝试使用service命令
+    if command -v service &> /dev/null; then
+        echo -e "${BLUE}尝试使用service命令启动V2Ray...${PLAIN}"
+        service v2ray start
         sleep 2
+        
+        # 检查是否成功启动
+        if service v2ray status 2>/dev/null | grep -q "running"; then
+            echo -e "${GREEN}V2Ray已通过service命令成功启动!${PLAIN}"
+        else
+            echo -e "${YELLOW}service命令启动失败，尝试直接运行V2Ray...${PLAIN}"
+            nohup /usr/local/bin/v2ray run -c /usr/local/etc/v2ray/config.json > /var/log/v2ray.log 2>&1 &
+            sleep 2
+            
+            if pgrep v2ray > /dev/null; then
+                echo -e "${GREEN}V2Ray已手动启动并正在运行!${PLAIN}"
+                echo -e "${YELLOW}注意: 在WSL环境中，您需要手动创建启动脚本以便系统重启后自动启动V2Ray${PLAIN}"
+                
+                # 创建启动脚本
+                cat > /etc/init.d/v2ray << EOFSERVICE
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          v2ray
+# Required-Start:    $network $local_fs $remote_fs
+# Required-Stop:     $network $local_fs $remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: V2Ray proxy service
+### END INIT INFO
+
+case "\$1" in
+  start)
+    echo "Starting V2Ray..."
+    nohup /usr/local/bin/v2ray run -c /usr/local/etc/v2ray/config.json > /var/log/v2ray.log 2>&1 &
+    ;;
+  stop)
+    echo "Stopping V2Ray..."
+    pkill v2ray
+    ;;
+  restart)
+    \$0 stop
+    sleep 1
+    \$0 start
+    ;;
+  status)
+    if pgrep v2ray > /dev/null; then
+      echo "V2Ray is running"
+    else
+      echo "V2Ray is not running"
+    fi
+    ;;
+  *)
+    echo "Usage: \$0 {start|stop|restart|status}"
+    exit 1
+    ;;
+esac
+
+exit 0
+EOFSERVICE
+                chmod +x /etc/init.d/v2ray
+                echo -e "${GREEN}已创建V2Ray启动脚本: /etc/init.d/v2ray${PLAIN}"
+                echo -e "${YELLOW}您可以使用 '/etc/init.d/v2ray start|stop|restart|status' 来控制V2Ray${PLAIN}"
+            else
+                echo -e "${RED}V2Ray启动失败，请检查日志: /var/log/v2ray.log${PLAIN}"
+                exit 1
+            fi
+        fi
+    else
+        # 如果service命令不可用，直接运行V2Ray
+        echo -e "${YELLOW}service命令不可用，直接运行V2Ray...${PLAIN}"
+        nohup /usr/local/bin/v2ray run -c /usr/local/etc/v2ray/config.json > /var/log/v2ray.log 2>&1 &
+        sleep 2
+        
         if pgrep v2ray > /dev/null; then
             echo -e "${GREEN}V2Ray已手动启动并正在运行!${PLAIN}"
+            # 创建启动脚本同上
         else
-            echo -e "${RED}V2Ray安装失败，请检查日志${PLAIN}"
+            echo -e "${RED}V2Ray启动失败，请检查日志: /var/log/v2ray.log${PLAIN}"
             exit 1
         fi
     fi
 else
     # 非WSL环境使用systemctl
-    systemctl enable v2ray
-    systemctl restart v2ray
-    # 检查V2Ray状态
-    if systemctl status v2ray | grep -q "active (running)"; then
-        echo -e "${GREEN}V2Ray安装成功并正在运行!${PLAIN}"
+    if command -v systemctl &> /dev/null; then
+        echo -e "${BLUE}使用systemctl启动V2Ray...${PLAIN}"
+        systemctl enable v2ray
+        systemctl restart v2ray
+        sleep 2
+        
+        # 检查V2Ray状态
+        if systemctl status v2ray | grep -q "active (running)"; then
+            echo -e "${GREEN}V2Ray安装成功并正在运行!${PLAIN}"
+        else
+            echo -e "${RED}V2Ray安装失败，请检查日志${PLAIN}"
+            exit 1
+        fi
     else
-        echo -e "${RED}V2Ray安装失败，请检查日志${PLAIN}"
-        exit 1
+        echo -e "${YELLOW}systemctl命令不可用，尝试使用service命令...${PLAIN}"
+        service v2ray start
+        sleep 2
+        
+        if service v2ray status | grep -q "running"; then
+            echo -e "${GREEN}V2Ray已通过service命令成功启动!${PLAIN}"
+        else
+            echo -e "${RED}V2Ray启动失败，请检查系统服务管理器${PLAIN}"
+            exit 1
+        fi
     fi
 fi
 
 # 获取服务器IP
-IP=$(curl -s https://api.ipify.org)
-if [[ -z "$IP" ]]; then
-    IP=$(curl -s https://ipinfo.io/ip)
+echo -e "${BLUE}获取服务器IP...${PLAIN}"
+
+# 在WSL环境中，尝试获取宿主机Windows的IP
+if [ "$WSL_ENV" = true ]; then
+    echo -e "${YELLOW}WSL环境中获取IP地址...${PLAIN}"
+    
+    # 尝试获取WSL宿主机IP
+    if command -v ipconfig.exe &> /dev/null; then
+        # 尝试使用Windows的ipconfig命令获取IP
+        WINDOWS_IP=$(ipconfig.exe | grep -A 5 "Wireless LAN adapter" | grep "IPv4 Address" | head -n 1 | awk '{print $NF}' | tr -d '\r')
+        if [ -n "$WINDOWS_IP" ]; then
+            IP=$WINDOWS_IP
+            echo -e "${GREEN}已获取Windows宿主机IP: ${IP}${PLAIN}"
+        fi
+    fi
 fi
-if [[ -z "$IP" ]]; then
-    IP=$(curl -s https://api.ip.sb/ip)
+
+# 如果在WSL中未能获取宿主机IP，或者不是WSL环境，则尝试获取公网IP
+if [ -z "$IP" ]; then
+    if command -v curl &> /dev/null; then
+        IP=$(curl -s https://api.ipify.org)
+    fi
+    
+    if [ -z "$IP" ] && command -v curl &> /dev/null; then
+        IP=$(curl -s https://ipinfo.io/ip)
+    fi
+    
+    if [ -z "$IP" ] && command -v curl &> /dev/null; then
+        IP=$(curl -s https://api.ip.sb/ip)
+    fi
+    
+    if [ -z "$IP" ] && command -v wget &> /dev/null; then
+        IP=$(wget -qO- -t1 -T2 ipinfo.io/ip)
+    fi
 fi
-if [[ -z "$IP" ]]; then
-    IP=$(wget -qO- -t1 -T2 ipinfo.io/ip)
+
+# 如果仍然无法获取IP，使用本地IP
+if [ -z "$IP" ]; then
+    echo -e "${YELLOW}无法获取公网IP，尝试获取本地IP...${PLAIN}"
+    if command -v hostname &> /dev/null; then
+        IP=$(hostname -I | awk '{print $1}')
+    elif command -v ip &> /dev/null; then
+        IP=$(ip addr show | grep -E 'inet [0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | grep -v '127.0.0.1' | awk '{print $2}' | cut -d/ -f1 | head -n 1)
+    fi
+    
+    if [ -z "$IP" ]; then
+        echo -e "${RED}警告: 无法获取IP地址，使用127.0.0.1作为默认值${PLAIN}"
+        IP="127.0.0.1"
+    fi
 fi
 
 # 生成Clash配置
@@ -251,30 +405,58 @@ echo -e "${GREEN}==================================${PLAIN}"
 
 # 防火墙设置
 echo -e "${BLUE}配置防火墙...${PLAIN}"
+
 # 检查是否为WSL环境
-if grep -q Microsoft /proc/version; then
+if [ "$WSL_ENV" = true ]; then
     echo -e "${YELLOW}检测到WSL环境，WSL使用宿主机的防火墙，跳过防火墙配置...${PLAIN}"
     echo -e "${YELLOW}请确保在Windows防火墙中开放${PORT}端口${PLAIN}"
+    
+    # 提供Windows防火墙配置指南
+    echo -e "${GREEN}==================================${PLAIN}"
+    echo -e "${YELLOW}Windows防火墙配置指南:${PLAIN}"
+    echo -e "1. 打开Windows控制面板"
+    echo -e "2. 进入'系统和安全' -> 'Windows Defender防火墙'"
+    echo -e "3. 点击左侧的'高级设置'"
+    echo -e "4. 右键点击'入站规则'，选择'新建规则'"
+    echo -e "5. 选择'端口'，点击'下一步'"
+    echo -e "6. 选择'TCP'和'特定本地端口'，输入'${PORT}'，点击'下一步'"
+    echo -e "7. 选择'允许连接'，点击'下一步'"
+    echo -e "8. 选择应用规则的网络类型，点击'下一步'"
+    echo -e "9. 输入规则名称(如'V2Ray-TCP-${PORT}')，点击'完成'"
+    echo -e "10. 重复步骤4-9，为UDP协议创建相同的规则"
+    echo -e "${GREEN}==================================${PLAIN}"
 else
-    # 检查ufw命令是否可用
-    if ! command -v ufw &> /dev/null; then
-        echo -e "${YELLOW}ufw命令未找到，尝试安装ufw...${PLAIN}"
-        apt install -y ufw || apt-get install -y ufw
-    fi
-    
-    # 配置防火墙
-    ufw allow ${PORT}/tcp
-    ufw allow ${PORT}/udp
-    ufw allow 22/tcp
-    
-    # 如果防火墙未启用，询问是否启用
-    if ! ufw status | grep -q "Status: active"; then
-        echo -e "${YELLOW}防火墙当前未启用，是否启用? (y/n)${PLAIN}"
-        read -p "" -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            echo "y" | ufw enable
+    # 非WSL环境配置防火墙
+    if command -v ufw &> /dev/null; then
+        echo -e "${BLUE}使用ufw配置防火墙...${PLAIN}"
+        
+        # 配置防火墙规则
+        ufw allow ${PORT}/tcp
+        ufw allow ${PORT}/udp
+        ufw allow 22/tcp
+        
+        # 如果防火墙未启用，询问是否启用
+        if ! ufw status | grep -q "Status: active"; then
+            echo -e "${YELLOW}防火墙当前未启用，是否启用? (y/n)${PLAIN}"
+            read -p "" -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                echo "y" | ufw enable
+            fi
         fi
+    elif command -v firewall-cmd &> /dev/null; then
+        echo -e "${BLUE}使用firewall-cmd配置防火墙...${PLAIN}"
+        firewall-cmd --permanent --add-port=${PORT}/tcp
+        firewall-cmd --permanent --add-port=${PORT}/udp
+        firewall-cmd --reload
+    elif command -v iptables &> /dev/null; then
+        echo -e "${BLUE}使用iptables配置防火墙...${PLAIN}"
+        iptables -A INPUT -p tcp --dport ${PORT} -j ACCEPT
+        iptables -A INPUT -p udp --dport ${PORT} -j ACCEPT
+        echo -e "${YELLOW}注意: iptables规则在系统重启后会丢失，请考虑安装iptables-persistent${PLAIN}"
+    else
+        echo -e "${YELLOW}未找到支持的防火墙管理工具(ufw/firewall-cmd/iptables)，请手动配置防火墙${PLAIN}"
+        echo -e "${YELLOW}需要开放的端口: ${PORT}/tcp, ${PORT}/udp${PLAIN}"
     fi
 fi
 
