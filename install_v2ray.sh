@@ -68,13 +68,35 @@ fi
 
 # 更新系统并安装必要工具
 echo -e "${BLUE}更新系统并安装必要工具...${PLAIN}"
-apt update -y
-apt upgrade -y
-apt install -y curl wget unzip net-tools
+# 检查是否为WSL环境
+if grep -q Microsoft /proc/version; then
+    echo -e "${YELLOW}检测到WSL环境，使用apt-get命令...${PLAIN}"
+    apt-get update -y
+    apt-get upgrade -y
+    apt-get install -y curl wget unzip net-tools
+else
+    apt update -y
+    apt upgrade -y
+    apt install -y curl wget unzip net-tools
+fi
 
 # 安装V2Ray
 echo -e "${BLUE}安装V2Ray...${PLAIN}"
-bash <(curl -L https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh)
+# 检查curl命令是否可用
+if ! command -v curl &> /dev/null; then
+    echo -e "${YELLOW}curl命令未找到，尝试安装curl...${PLAIN}"
+    if grep -q Microsoft /proc/version; then
+        apt-get install -y curl
+    else
+        apt install -y curl
+    fi
+fi
+
+# 下载安装脚本并执行
+echo -e "${BLUE}下载V2Ray安装脚本...${PLAIN}"
+wget -O v2ray_install.sh https://raw.githubusercontent.com/v2fly/fhs-install-v2ray/master/install-release.sh
+chmod +x v2ray_install.sh
+bash ./v2ray_install.sh
 
 # 配置V2Ray
 echo -e "${BLUE}配置V2Ray...${PLAIN}"
@@ -110,15 +132,36 @@ EOF
 
 # 启动V2Ray并设置开机自启
 echo -e "${BLUE}启动V2Ray并设置开机自启...${PLAIN}"
-systemctl enable v2ray
-systemctl restart v2ray
 
-# 检查V2Ray状态
-if systemctl status v2ray | grep -q "active (running)"; then
-    echo -e "${GREEN}V2Ray安装成功并正在运行!${PLAIN}"
+# 检查是否为WSL环境
+if grep -q Microsoft /proc/version; then
+    echo -e "${YELLOW}检测到WSL环境，使用service命令启动V2Ray...${PLAIN}"
+    service v2ray start
+    # 检查V2Ray状态
+    if service v2ray status | grep -q "running"; then
+        echo -e "${GREEN}V2Ray安装成功并正在运行!${PLAIN}"
+    else
+        echo -e "${YELLOW}尝试直接运行V2Ray...${PLAIN}"
+        /usr/local/bin/v2ray run -c /usr/local/etc/v2ray/config.json &
+        sleep 2
+        if pgrep v2ray > /dev/null; then
+            echo -e "${GREEN}V2Ray已手动启动并正在运行!${PLAIN}"
+        else
+            echo -e "${RED}V2Ray安装失败，请检查日志${PLAIN}"
+            exit 1
+        fi
+    fi
 else
-    echo -e "${RED}V2Ray安装失败，请检查日志${PLAIN}"
-    exit 1
+    # 非WSL环境使用systemctl
+    systemctl enable v2ray
+    systemctl restart v2ray
+    # 检查V2Ray状态
+    if systemctl status v2ray | grep -q "active (running)"; then
+        echo -e "${GREEN}V2Ray安装成功并正在运行!${PLAIN}"
+    else
+        echo -e "${RED}V2Ray安装失败，请检查日志${PLAIN}"
+        exit 1
+    fi
 fi
 
 # 获取服务器IP
@@ -208,9 +251,31 @@ echo -e "${GREEN}==================================${PLAIN}"
 
 # 防火墙设置
 echo -e "${BLUE}配置防火墙...${PLAIN}"
-apt install -y ufw
-ufw allow ${PORT}/tcp
-ufw allow ${PORT}/udp
-ufw allow 22/tcp
+# 检查是否为WSL环境
+if grep -q Microsoft /proc/version; then
+    echo -e "${YELLOW}检测到WSL环境，WSL使用宿主机的防火墙，跳过防火墙配置...${PLAIN}"
+    echo -e "${YELLOW}请确保在Windows防火墙中开放${PORT}端口${PLAIN}"
+else
+    # 检查ufw命令是否可用
+    if ! command -v ufw &> /dev/null; then
+        echo -e "${YELLOW}ufw命令未找到，尝试安装ufw...${PLAIN}"
+        apt install -y ufw || apt-get install -y ufw
+    fi
+    
+    # 配置防火墙
+    ufw allow ${PORT}/tcp
+    ufw allow ${PORT}/udp
+    ufw allow 22/tcp
+    
+    # 如果防火墙未启用，询问是否启用
+    if ! ufw status | grep -q "Status: active"; then
+        echo -e "${YELLOW}防火墙当前未启用，是否启用? (y/n)${PLAIN}"
+        read -p "" -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            echo "y" | ufw enable
+        fi
+    fi
+fi
 
 echo -e "${GREEN}安装完成!${PLAIN}"
